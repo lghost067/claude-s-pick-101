@@ -17,7 +17,7 @@ Type your excuse for being late. A very judgmental judge rates how believable it
 - **Terribleness percentile**: how your excuse ranks against 360 sample excuses
 - **Gavel sound**: generated in the browser with the Web Audio API, no sound files
 - **Same excuse, same verdict**: rulings are deterministic, so you can't re-roll your way to freedom
-- **Hall of Shame**: on the claude.ai version, excuses worse than 99% of the cases on record get filed into a shared hall automatically
+- **Hall of Shame**: any excuse at least as bad as 99% of the cases on record gets filed automatically. Every player gets a personal hall saved in their own browser; the claude.ai version has one hall shared by everyone invited.
 
 ### How it's built
 

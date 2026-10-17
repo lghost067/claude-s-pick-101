@@ -557,6 +557,41 @@ function renderShame(snap) {
   }));
 }
 
+// Outside claude.ai (e.g. GitHub Pages) each player gets a personal hall instead: this stands in for the shared
+// database with the same calls the page uses, kept in this browser's localStorage (or in memory if that's blocked).
+function localDb() {
+  const KEY = "excuse-court-db";
+  let data = { shame: {}, rulings: {} };
+  try { data = { ...data, ...JSON.parse(localStorage.getItem(KEY) || "{}") }; } catch {}
+  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(data)); } catch {} };
+  const subs = [];
+  const page = (c, order, n) => {
+    let docs = Object.entries(data[c] || {}).map(([id, v]) => ({ id, exists: true, data: () => v }));
+    if (order) docs.sort((a, b) => (a.data()[order[0]] - b.data()[order[0]]) * (order[1] === "desc" ? -1 : 1));
+    if (n) docs = docs.slice(0, n);
+    return { docs, size: docs.length, empty: !docs.length, metadata: { fromCache: false, hasPendingWrites: false } };
+  };
+  const query = (c, order = null, n = null) => ({
+    orderBy: (field, dir = "asc") => query(c, [field, dir], n),
+    limit: k => query(c, order, k),
+    onSnapshot(next) {
+      const sub = { c, fire: () => next(page(c, order, n)) };
+      subs.push(sub);
+      setTimeout(sub.fire, 0);
+      return () => subs.splice(subs.indexOf(sub), 1);
+    },
+    doc: id => ({
+      get: async () => ({ id, exists: id in (data[c] || {}), data: () => data[c]?.[id] }),
+      set: async v => {
+        (data[c] ||= {})[id] = v;
+        save();
+        subs.filter(s => s.c === c).forEach(s => s.fire());
+      },
+    }),
+  });
+  return { collection: c => query(c) };
+}
+
 // Subscribe once. A listener that dies of a transient error gets one fresh subscription, per the db contract;
 // `lost` runs while the replacement is pending.
 function watch(query, next, dead, lost = () => {}, retried = false) {
@@ -572,13 +607,13 @@ function watch(query, next, dead, lost = () => {}, retried = false) {
 
 (async () => {
   try { shameDb = (await window.claude?.use?.("db")) ?? null; } catch { shameDb = null; }
-  markDbReady();
-  if (!shameDb) {
-    liveDead = true;
-    liveChanged();
-    $("shame-note").textContent = "Open this page on claude.ai while signed in to see the shared Hall of Shame.";
-    return;
+  const personal = !shameDb;
+  if (personal) {
+    shameDb = localDb();
+    canWrite = true;
+    $("shame-note").textContent = "Your personal Hall of Shame, saved in this browser. Any excuse at least as bad as 99% of the cases on record gets filed here automatically.";
   }
+  markDbReady();
   watch(
     shameDb.collection("shame").orderBy("score", "asc").limit(10),
     snap => renderShame(snap),
@@ -606,6 +641,7 @@ function watch(query, next, dead, lost = () => {}, retried = false) {
     () => { liveOk = false; liveDead = true; liveChanged(); },
     () => { liveOk = false; }
   );
+  if (personal) return;
   const user = await window.claude.use("user");
   const can = user ? await user.can("data.write") : null;
   if (canWrite !== false) canWrite = can;
