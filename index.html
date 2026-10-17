@@ -100,7 +100,7 @@
   .shame h2 { font: 400 22px/1.1 var(--f-display); margin: 0; color: var(--stamp-bad); }
   .shame-note { font-size: 12px; color: var(--ink-soft); margin: 0; }
   .shame ol { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 10px; counter-reset: rank; }
-  .shame li { display: grid; grid-template-columns: 44px 1fr; gap: 10px; align-items: start; counter-increment: rank; }
+  .shame li { display: grid; grid-template-columns: 56px 1fr; gap: 10px; align-items: start; counter-increment: rank; }
   .shame li > * { min-width: 0; }
   .shame .rank { font: 400 20px/1 var(--f-display); font-variant-numeric: tabular-nums; color: var(--ink-soft); padding-top: 4px; }
   .shame .rank::before { content: "#" counter(rank); }
@@ -109,7 +109,7 @@
   .shame .meta b { color: var(--c, var(--stamp-bad)); font-weight: 600; }
   .shame-empty { font: 700 19px var(--f-hand); color: var(--ink-soft); margin: 0; }
   .copy-box {
-    width: 100%; box-sizing: border-box; resize: none;
+    width: 100%; box-sizing: border-box; resize: vertical;
     font: 400 13px/1.5 var(--f-mono); color: var(--ink);
     background: rgb(255 255 255 / .7); border: 1px solid var(--ink-soft); border-radius: 6px; padding: 8px 10px;
   }
@@ -152,7 +152,7 @@
     <button class="ghost" id="sound" type="button" aria-pressed="true">Sound: on</button>
     <span class="toast" id="toast" aria-live="polite"></span>
   </div>
-  <textarea class="copy-box" id="copy-box" rows="4" readonly hidden aria-label="Verdict to copy"></textarea>
+  <textarea class="copy-box" id="copy-box" rows="6" readonly hidden aria-label="Verdict to copy"></textarea>
 
   <section class="ruling" aria-live="polite">
     <div class="ruling-top">
@@ -166,7 +166,7 @@
     <ul class="exhibits" id="exhibits"></ul>
   </section>
 
-  <section class="shame" aria-live="polite">
+  <section class="shame">
     <h2>Hall of Shame</h2>
     <p class="shame-note" id="shame-note">Any excuse at least as bad as 99% of the cases on record gets filed here automatically. These are the 10 least believable.</p>
     <ol id="shame-list"></ol>
@@ -225,7 +225,8 @@ function hash(s) {
 }
 
 function rule(text) {
-  const t = text.trim();
+  // Score the same lowercased text the hashes use, so one case key always means one score.
+  const t = text.trim().toLowerCase();
   const h = hash(t);
   const exhibits = [];
   let score = 50;
@@ -359,7 +360,8 @@ let blocked = null;          // why filing stopped for this visit: "readonly", "
 let slots = new Map();       // slot id -> { key, score }
 let liveScores = new Map();  // case key -> score
 let liveOk = false;          // a server-definitive rulings snapshot arrived and the listener is alive
-const filing = new Set();    // case keys with writes in flight
+const filing = new Map();    // case key -> the ruling whose filing is in flight
+const slotWrites = new Map(); // slot id -> the write to that slot in flight (one write per doc at a time)
 let markDbReady, markLiveReady;
 const dbReady = new Promise(res => { markDbReady = res; });
 const liveReady = new Promise(res => { markLiveReady = res; });
@@ -375,9 +377,10 @@ function verdictFor(score) {
 }
 
 // Compare with every other case on record: how many are at least as believable (ties count against you).
-function terribleness(score, key) {
+function terribleness(score, key, seedOnly = false) {
   let atLeast = 0, total = 0;
   for (const [s, n] of Object.entries(SEED_SCORES)) { total += n; if (Number(s) >= score) atLeast += n; }
+  if (seedOnly) return { atLeast, total };
   for (const [k, s] of liveScores) {
     if (k === key) continue;
     total++;
@@ -388,12 +391,16 @@ function terribleness(score, key) {
 const isShameworthy = ({ atLeast, total }) => atLeast * 100 >= 99 * total;
 
 function showPercentile(r) {
-  const t = r.final || terribleness(r.score, r.key);
+  // A repeat press during filing follows the first press, so it shows the comparison that filing froze.
+  const t = r.final || r.follows?.final || terribleness(r.score, r.key);
   const pct = Math.min(99, Math.floor(t.atLeast * 100 / t.total));
+  const rank = `${ordinal(pct)} percentile`, count = `${t.total.toLocaleString("en-US")} cases on record`;
   const p = $("percentile");
+  if (p.dataset.shown === rank + count) return;   // unchanged: don't make screen readers repeat it
+  p.dataset.shown = rank + count;
   p.innerHTML = `Terribleness: <b></b> · <span></span>`;
-  p.querySelector("b").textContent = `${ordinal(pct)} percentile`;
-  p.querySelector("span").textContent = `${t.total.toLocaleString("en-US")} cases on record`;
+  p.querySelector("b").textContent = rank;
+  p.querySelector("span").textContent = count;
 }
 
 const WORST = "At least as bad as 99% of the cases on record.";
@@ -427,21 +434,28 @@ function writeProblem(e) {
   }
 }
 
-// One write; "unavailable" gets a single retry after a short random delay.
-async function write(ref, data) {
+// The db contract says to treat "unavailable", and any code it doesn't list, as transient.
+const KNOWN_CODES = new Set(["invalid_argument", "resource_exhausted", "quota_exceeded", "unavailable", "revoked",
+  "not_granted", "capability_disabled", "capability_removed", "transform_error"]);
+const transient = e => e?.code === "unavailable" || !KNOWN_CODES.has(e?.code);
+
+// One call; a transient failure gets a single retry after a short random delay.
+async function once(call) {
   try {
-    await ref.set(data);
+    return await call();
   } catch (e) {
-    if (e?.code !== "unavailable") throw e;
+    if (!transient(e)) throw e;
     await wait(400 + Math.random() * 800);
-    await ref.set(data);
+    return await call();
   }
 }
+const write = (ref, data) => once(() => ref.set(data));
 
-async function fileRuling(r) {
-  if (filing.has(r.key)) return;   // this case is already being filed
-  filing.add(r.key);
-  try { await fileCase(r); } finally { filing.delete(r.key); }
+function fileRuling(r) {
+  const busy = filing.get(r.key);
+  if (busy) { r.follows = busy; return; }   // this case is already being filed
+  filing.set(r.key, r);
+  fileCase(r).finally(() => filing.delete(r.key));
 }
 
 async function fileCase(r) {
@@ -449,18 +463,20 @@ async function fileCase(r) {
   if (!shameDb) return;
   await Promise.race([liveReady, wait(8000)]);
   if (!liveOk) {
-    if (isShameworthy(terribleness(r.score, r.key))) showShamed(r, "nodata");
+    r.final = terribleness(r.score, r.key, true);   // all this page can vouch for is the seed
+    if (onScreen(r)) showPercentile(last);
+    if (isShameworthy(r.final)) showShamed(r, "nodata");
     return;
   }
   r.final = terribleness(r.score, r.key);   // freeze the comparison this decision rests on
-  if (onScreen(r)) { last.final = r.final; showPercentile(last); }
+  if (onScreen(r)) showPercentile(last);
 
   await recordRuling(r);
   if (!isShameworthy(r.final)) return;
 
   const ref = shameDb.collection("shame").doc(r.key);
-  let exists = false;
-  try { exists = (await ref.get()).exists; } catch {}
+  let exists;
+  try { exists = (await once(() => ref.get())).exists; } catch { showShamed(r, "failed"); return; }
   if (exists) { showShamed(r, "already"); return; }
   if (writesOff() || blocked === "full") { showShamed(r, blocked || "readonly"); return; }
 
@@ -475,19 +491,22 @@ async function fileCase(r) {
 }
 
 async function recordRuling(r) {
+  const id = slotFor(r.key);
+  while (slotWrites.has(id)) await slotWrites.get(id);   // another excuse is writing this slot
   if (writesOff()) return;
-  const id = slotFor(r.key), held = slots.get(id);
+  const held = slots.get(id);
   if (held && held.key === r.key && held.score === r.score) return;   // already on record
-  try {
-    await write(shameDb.collection("rulings").doc(id), { key: r.key, score: r.score, at: Date.now() });
-  } catch (e) {
-    const problem = writeProblem(e);
-    if (problem === "readonly" || problem === "gone") blocked = problem;
-  }
+  const pending = write(shameDb.collection("rulings").doc(id), { key: r.key, score: r.score, at: Date.now() })
+    .catch(e => {
+      const problem = writeProblem(e);
+      if (problem === "readonly" || problem === "gone") blocked = problem;
+    });
+  slotWrites.set(id, pending);
+  try { await pending; } finally { slotWrites.delete(id); }
 }
 
-function renderShame(docs) {
-  const seen = new Set(), rows = [];
+function renderShame(snap) {
+  const docs = snap.docs, seen = new Set(), rows = [];
   for (const d of docs) {
     const e = d.data() || {};
     if (typeof e.excuse !== "string" || !Number.isInteger(e.score) || e.score < 0 || e.score > 100) continue;
@@ -496,8 +515,12 @@ function renderShame(docs) {
     seen.add(k);
     rows.push(e);
   }
-  $("shame-empty").hidden = rows.length > 0;
-  $("shame-list").replaceChildren(...rows.map(e => {
+  // An empty page from the local cache isn't proof the hall is empty; wait for the server's answer.
+  $("shame-empty").hidden = rows.length > 0 || !!snap.metadata?.fromCache;
+  const list = $("shame-list"), shown = JSON.stringify(rows.map(e => [e.excuse, e.score, e.docket]));
+  if (list.dataset.shown === shown) return;
+  list.dataset.shown = shown;
+  list.replaceChildren(...rows.map(e => {
     const [, verdict, color] = verdictFor(e.score);
     const li = document.createElement("li");
     li.innerHTML = `<span class="rank"></span><div><div class="quote"></div><div class="meta"><b></b> · <span></span></div></div>`;
@@ -509,10 +532,10 @@ function renderShame(docs) {
   }));
 }
 
-// Subscribe once. A listener that dies with "unavailable" gets one fresh subscription, per the db contract.
+// Subscribe once. A listener that dies of a transient error gets one fresh subscription, per the db contract.
 function watch(query, next, dead, retried = false) {
   query.onSnapshot(next, e => {
-    if (e?.code === "unavailable" && !retried) setTimeout(() => watch(query, next, dead, true), 1500 + Math.random() * 1500);
+    if (transient(e) && !retried) setTimeout(() => watch(query, next, dead, true), 1500 + Math.random() * 1500);
     else dead(e);
   });
 }
@@ -527,7 +550,7 @@ function watch(query, next, dead, retried = false) {
   }
   watch(
     shameDb.collection("shame").orderBy("score", "asc").limit(10),
-    snap => renderShame(snap.docs),
+    snap => renderShame(snap),
     () => {
       $("shame-note").textContent = "The Hall of Shame is closed right now. Refresh to try again.";
       $("shame-empty").hidden = true;
@@ -580,6 +603,7 @@ $("copy").onclick = () => {
     box.hidden = false;
     box.focus();
     box.select();
+    box.scrollTop = 0;   // selecting scrolls to the end; show the start of the verdict instead
     $("toast").textContent = "Couldn't copy automatically. The verdict is selected below, so copy it from there.";
   };
   try {
