@@ -1,0 +1,265 @@
+<title>Excuse Court</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Rubik+Mono+One&family=Kalam:wght@400;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<style>
+  /* Layout: one legal-pad sheet, excuse written on top, the judge's ruling stamped below. Single committed look. */
+  :root {
+    --pad: #fbf3c4;
+    --pad-edge: #efe2a0;
+    --rule: #a9c4e4;
+    --margin: #e0566b;
+    --ink: #1f2a44;
+    --ink-soft: #5a6480;
+    --stamp-good: #1d7a4c;
+    --stamp-mid: #c27a0e;
+    --stamp-bad: #c22a3c;
+    --desk: #2b2622;
+    --f-display: "Rubik Mono One", "Arial Black", Impact, sans-serif;
+    --f-hand: "Kalam", "Comic Sans MS", "Segoe Print", cursive;
+    --f-mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+    color-scheme: light;
+  }
+  html, body { background: var(--desk); color: var(--ink); }
+  body {
+    font-family: var(--f-mono);
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 32px 48px;
+  }
+  .sheet {
+    max-width: 640px; margin: 0 auto;
+    background:
+      linear-gradient(to right, transparent 46px, var(--margin) 46px, var(--margin) 48px, transparent 48px),
+      repeating-linear-gradient(to bottom, var(--pad) 0 31px, var(--rule) 31px 32px);
+    background-color: var(--pad);
+    border-top: 28px solid var(--pad-edge);
+    box-shadow: 0 18px 40px rgb(0 0 0 / .45);
+    padding: 24px 22px 32px 64px;
+    display: flex; flex-direction: column; gap: 22px;
+    position: relative;
+  }
+  header { display: flex; flex-direction: column; gap: 6px; }
+  .docket { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-soft); }
+  h1 { font-family: var(--f-display); font-weight: 400; font-size: clamp(30px, 8vw, 46px); line-height: 1; margin: 0; text-wrap: balance; }
+  .sub { font-family: var(--f-hand); font-size: 19px; margin: 0; color: var(--ink-soft); }
+
+  label { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-soft); }
+  textarea {
+    width: 100%; box-sizing: border-box; resize: vertical; min-height: 96px;
+    font: 700 22px/32px var(--f-hand); color: var(--ink);
+    background: transparent; border: 0; border-bottom: 2px dashed var(--ink-soft);
+    padding: 0; outline: none;
+  }
+  textarea:focus-visible { border-bottom-color: var(--ink); }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+
+  .samples { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    font: 400 12px var(--f-mono); color: var(--ink);
+    background: rgb(255 255 255 / .55); border: 1px solid var(--ink-soft); border-radius: 999px;
+    padding: 5px 11px; cursor: pointer;
+  }
+  .chip:hover { background: #fff; }
+  .actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  button.gavel {
+    font: 400 15px var(--f-display); letter-spacing: .04em;
+    background: var(--ink); color: var(--pad); border: 0; border-radius: 6px;
+    padding: 14px 20px; cursor: pointer; box-shadow: 0 4px 0 #0b1122;
+  }
+  button.gavel:active { transform: translateY(3px); box-shadow: 0 1px 0 #0b1122; }
+  button:focus-visible, .chip:focus-visible { outline: 3px solid var(--margin); outline-offset: 2px; }
+  .ghost { font: 600 13px var(--f-mono); background: none; border: 0; color: var(--ink); text-decoration: underline; cursor: pointer; padding: 6px; }
+
+  .ruling { display: flex; flex-direction: column; gap: 14px; border-top: 2px solid var(--ink); padding-top: 18px; }
+  .ruling-top { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; justify-content: space-between; }
+  .score { display: flex; flex-direction: column; gap: 2px; }
+  .score b { font: 400 54px/1 var(--f-display); font-variant-numeric: tabular-nums; }
+  .score span { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-soft); }
+  .stamp {
+    --c: var(--stamp-bad);
+    font: 400 clamp(17px, 4.6vw, 24px)/1.1 var(--f-display); color: var(--c);
+    border: 4px double var(--c); border-radius: 8px; padding: 8px 14px;
+    transform: rotate(-7deg); text-align: center; max-width: 100%;
+    mix-blend-mode: multiply; opacity: .9;
+  }
+  .stamp.slam { animation: slam .35s cubic-bezier(.2,1.6,.4,1); }
+  @keyframes slam { from { transform: rotate(-18deg) scale(2.2); opacity: 0; } to { transform: rotate(-7deg) scale(1); opacity: .9; } }
+  .meter { height: 14px; border: 2px solid var(--ink); border-radius: 999px; overflow: hidden; background: rgb(255 255 255 / .5); }
+  .meter i { display: block; height: 100%; width: 0; background: var(--c, var(--stamp-bad)); transition: width .6s ease; }
+  .remark { font: 700 22px/32px var(--f-hand); margin: 0; }
+  .exhibits { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+  .exhibits li { font-size: 13px; line-height: 1.5; display: grid; grid-template-columns: 92px 1fr; gap: 8px; }
+  .exhibits li > * { min-width: 0; }
+  .exhibits .tag { font-weight: 600; }
+  .delta { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .toast { font-size: 12px; color: var(--stamp-good); }
+  footer { font-size: 11px; color: var(--ink-soft); }
+
+  @media (max-width: 480px) {
+    .sheet { padding-left: 52px; padding-right: 14px; background:
+      linear-gradient(to right, transparent 38px, var(--margin) 38px, var(--margin) 40px, transparent 40px),
+      repeating-linear-gradient(to bottom, var(--pad) 0 31px, var(--rule) 31px 32px); }
+    .exhibits li { grid-template-columns: 1fr; gap: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) { .stamp.slam { animation: none; } .meter i { transition: none; } }
+</style>
+
+<main class="sheet">
+  <header>
+    <div class="docket" id="docket">Docket No. —</div>
+    <h1>Excuse Court</h1>
+    <p class="sub">Tell the judge why you were late. The judge has heard it all.</p>
+  </header>
+
+  <div class="field">
+    <label for="excuse">Your excuse, under oath</label>
+    <textarea id="excuse" maxlength="400" placeholder="ok so basically…"></textarea>
+  </div>
+
+  <div class="field">
+    <label>Or borrow a classic</label>
+    <div class="samples" id="samples"></div>
+  </div>
+
+  <div class="actions">
+    <button class="gavel" id="judge" type="button">Bang the gavel</button>
+    <button class="ghost" id="copy" type="button">Copy verdict</button>
+    <span class="toast" id="toast" aria-live="polite"></span>
+  </div>
+
+  <section class="ruling" aria-live="polite">
+    <div class="ruling-top">
+      <div class="score"><b id="score">0</b><span>Believability / 100</span></div>
+      <div class="stamp" id="stamp">—</div>
+    </div>
+    <div class="meter"><i id="bar"></i></div>
+    <p class="remark" id="remark"></p>
+    <ul class="exhibits" id="exhibits"></ul>
+  </section>
+
+  <footer>The ruling is final. Same excuse, same verdict, so re-rolling won't save you.</footer>
+</main>
+
+<script>
+const SAMPLES = [
+  "My dog ate my homework",
+  "My alarm didn't go off because my phone died at 3:12am",
+  "I got abducted by aliens but they dropped me off at the wrong bus stop",
+  "Traffic on the highway was insane, there was a crash",
+  "Mercury is in retrograde so the vibes were off",
+  "Honestly I just forgot, sorry",
+  "My grandma is sick again",
+  "The wifi went out literally right as I hit submit I swear",
+];
+
+// Each rule: pattern, score change, exhibit label, judge's note.
+const RULES = [
+  [/\b(dog|cat|hamster|pet)\b.*\b(ate|eaten|chewed)\b/i, -32, "Pet crime", "The dog has retained counsel and pleads not guilty."],
+  [/\b(alien|ufo|abduct)/i, -38, "Extraterrestrial", "Bold. Wrong, but bold. Creativity is noted."],
+  [/\b(retrograde|vibes?|astrolog|horoscope|manifest)/i, -22, "Cosmic forces", "The planets cannot be subpoenaed."],
+  [/\b(grandma|grandmother|nana|granny|grandpa)\b/i, -14, "Grandparent card", "Court records show this grandparent has been ill 11 times this semester."],
+  [/\b(wi-?fi|internet|router|laptop died|computer crashed)\b/i, -6, "Tech failure", "Convenient. Very convenient."],
+  [/\b(traffic|crash|accident|bus|train|uber|subway)\b/i, 8, "Transit", "Transit chaos is a known natural disaster. Plausible."],
+  [/\b(alarm|overslept|slept through)\b/i, 6, "Sleep", "Relatable. The court has also overslept."],
+  [/\b(sick|fever|food poisoning|throw(ing)? up|vomit|doctor|dentist)\b/i, 12, "Medical", "Nobody wants to verify this. Accepted with mild suspicion."],
+  [/\b(forgot|my bad|my fault|i messed up)\b/i, 18, "Honesty", "Admitting fault? In this economy? Respect."],
+  [/\b(literally|i swear|no cap|fr fr|trust me|deadass|on god)\b/i, -11, "Sus phrasing", "Swearing it's true makes it less true. That's just science."],
+  [/\b\d{1,2}(:\d{2})?\s?(am|pm)\b|\b\d{1,2}:\d{2}\b/i, 9, "Specific time", "Exact timestamps. Either honest or a very committed liar."],
+];
+
+const VERDICTS = [
+  [80, "ACQUITTED", "var(--stamp-good)"],
+  [55, "PROBATION", "var(--stamp-mid)"],
+  [25, "GUILTY", "var(--stamp-bad)"],
+  [0,  "CONTEMPT OF COURT", "var(--stamp-bad)"],
+];
+
+const CLOSERS = {
+  ACQUITTED: ["You're free to go. Don't push it.", "The court believes you. Weirdly.", "Case dismissed. Go touch grass."],
+  PROBATION: ["The court is 50/50 on you, bestie.", "Mid excuse. One more and it's over.", "Allowed, but the judge is side-eyeing you."],
+  GUILTY: ["Nobody in this room believes you.", "The jury laughed. Out loud.", "Sentenced to apologize in person."],
+  "CONTEMPT OF COURT": ["Bailiff, remove this excuse from my sight.", "This is the worst excuse ever filed here.", "The judge has left the building."],
+};
+
+// Small string hash so the same excuse always gets the same ruling.
+function hash(s) {
+  let h = 2166136261;
+  for (const ch of s.toLowerCase().trim()) { h ^= ch.codePointAt(0); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+
+function rule(text) {
+  const t = text.trim();
+  const h = hash(t);
+  const exhibits = [];
+  let score = 50;
+  for (const [re, delta, tag, note] of RULES) {
+    if (re.test(t)) { score += delta; exhibits.push({ tag, delta, note }); }
+  }
+  if (t.length < 18) { score -= 14; exhibits.push({ tag: "Low effort", delta: -14, note: "That's not an excuse, that's a shrug." }); }
+  if (t.length > 220) { score -= 10; exhibits.push({ tag: "Yapping", delta: -10, note: "Overexplaining is the #1 sign of lying." }); }
+  if (/!{2,}/.test(t)) { score -= 5; exhibits.push({ tag: "Panic", delta: -5, note: "The extra exclamation marks are doing a lot." }); }
+  if (/\p{Extended_Pictographic}/u.test(t)) { score -= 4; exhibits.push({ tag: "Emoji", delta: -4, note: "Emoji are not admissible evidence." }); }
+  if (!exhibits.length) exhibits.push({ tag: "Unknown", delta: 0, note: "The court has never heard this one. Suspicious in its originality." });
+
+  const jitter = (h % 15) - 7;
+  score = Math.max(0, Math.min(100, score + jitter));
+  const [, verdict, color] = VERDICTS.find(([min]) => score >= min);
+  const lines = CLOSERS[verdict];
+  return { score, verdict, color, exhibits, closer: lines[h % lines.length], docket: `EC-${String(h % 100000).padStart(5, "0")}` };
+}
+
+const $ = id => document.getElementById(id);
+let last = null;
+
+function render(r, animate) {
+  last = r;
+  $("docket").textContent = `Docket No. ${r.docket}`;
+  $("score").textContent = r.score;
+  const stamp = $("stamp");
+  stamp.textContent = r.verdict;
+  stamp.style.setProperty("--c", r.color);
+  $("bar").style.setProperty("--c", r.color);
+  $("bar").style.width = r.score + "%";
+  if (animate) { stamp.classList.remove("slam"); void stamp.offsetWidth; stamp.classList.add("slam"); }
+  $("remark").textContent = r.closer;
+  $("exhibits").replaceChildren(...r.exhibits.map((e, i) => {
+    const li = document.createElement("li");
+    const sign = e.delta > 0 ? "+" : "";
+    li.innerHTML = `<span class="tag">Exhibit ${String.fromCharCode(65 + i)}</span><span></span>`;
+    li.lastChild.textContent = `${e.tag} (${sign}${e.delta}). ${e.note}`;
+    return li;
+  }));
+}
+
+function judge(animate = true) {
+  const text = $("excuse").value;
+  if (!text.trim()) { $("toast").textContent = "Write an excuse first. Silence is not a defense."; return; }
+  $("toast").textContent = "";
+  render(rule(text), animate);
+}
+
+$("samples").replaceChildren(...SAMPLES.map(s => {
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "chip"; b.textContent = s;
+  b.onclick = () => { $("excuse").value = s; judge(); };
+  return b;
+}));
+
+$("judge").onclick = () => judge();
+$("excuse").addEventListener("keydown", e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) judge(); });
+
+$("copy").onclick = () => {
+  if (!last) return;
+  const text = `Excuse Court ${last.docket}\n"${$("excuse").value.trim()}"\nVerdict: ${last.verdict} (${last.score}/100)\n${last.closer}`;
+  const done = () => { $("toast").textContent = "Copied. Go embarrass yourself."; };
+  try {
+    navigator.clipboard.writeText(text).then(done, () => { $("excuse").select(); $("toast").textContent = "Couldn't copy. Select the text and copy it yourself."; });
+  } catch { $("toast").textContent = "Couldn't copy. Select the text and copy it yourself."; }
+};
+
+// Open with a case already on the record.
+$("excuse").value = SAMPLES[0];
+judge(false);
+</script>
