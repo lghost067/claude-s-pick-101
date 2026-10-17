@@ -108,14 +108,12 @@
   .shame .meta { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-soft); }
   .shame .meta b { color: var(--c, var(--stamp-bad)); font-weight: 600; }
   .shame-empty { font: 700 19px var(--f-hand); color: var(--ink-soft); margin: 0; }
-  button.enshrine {
-    align-self: flex-start;
-    font: 400 13px var(--f-display); letter-spacing: .03em;
-    background: transparent; color: var(--stamp-bad); border: 2px solid var(--stamp-bad); border-radius: 6px;
-    padding: 10px 14px; cursor: pointer;
+  .percentile { font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-soft); margin: 0; font-variant-numeric: tabular-nums; }
+  .percentile b { color: var(--ink); font-weight: 600; }
+  .shamed-note {
+    margin: 0; font: 700 19px/1.35 var(--f-hand); color: var(--stamp-bad);
+    border: 2px dashed var(--stamp-bad); border-radius: 6px; padding: 6px 12px;
   }
-  button.enshrine:hover { background: var(--stamp-bad); color: var(--pad); }
-  button.enshrine:disabled { opacity: .45; cursor: default; background: transparent; color: var(--stamp-bad); }
 
   @media (max-width: 480px) {
     .sheet { padding-left: 52px; padding-right: 14px; background:
@@ -156,14 +154,15 @@
       <div class="stamp" id="stamp">—</div>
     </div>
     <div class="meter"><i id="bar"></i></div>
+    <p class="percentile" id="percentile"></p>
     <p class="remark" id="remark"></p>
+    <p class="shamed-note" id="shamed-note" hidden></p>
     <ul class="exhibits" id="exhibits"></ul>
-    <button class="enshrine" id="enshrine" type="button" hidden>Add to the Hall of Shame</button>
   </section>
 
   <section class="shame" aria-live="polite">
     <h2>Hall of Shame</h2>
-    <p class="shame-note" id="shame-note">The 10 least believable excuses ever filed in this court.</p>
+    <p class="shame-note" id="shame-note">Excuses worse than 99% of the cases on record get filed here automatically. These are the 10 least believable.</p>
     <ol id="shame-list"></ol>
     <p class="shame-empty" id="shame-empty">Nobody has been shamed yet. Be the first.</p>
   </section>
@@ -237,7 +236,28 @@ function rule(text) {
   score = Math.max(0, Math.min(100, score + jitter));
   const [, verdict, color] = VERDICTS.find(([min]) => score >= min);
   const lines = CLOSERS[verdict];
-  return { score, verdict, color, exhibits, closer: lines[h % lines.length], docket: `EC-${String(h % 100000).padStart(5, "0")}` };
+  return { score, verdict, color, exhibits, closer: lines[h % lines.length], docket: `EC-${String(h % 100000).padStart(5, "0")}`, key: caseKey(t) };
+}
+
+// Database id for an excuse. The 5-digit docket collides too easily to use as a key, so combine two 32-bit hashes.
+function caseKey(s) {
+  let a = 2166136261, b = 5381;
+  for (const ch of s.toLowerCase().trim()) {
+    const c = ch.codePointAt(0);
+    a ^= c; a = Math.imul(a, 16777619);
+    b = (Math.imul(b, 33) + c) | 0;
+  }
+  return (a >>> 0).toString(36) + "-" + (b >>> 0).toString(36);
+}
+
+// Scores of 360 sample excuses (ordinary, sketchy and unhinged), so percentiles mean something before anyone files a case.
+// Regenerate this if the scoring rules above change.
+// score: number of sample excuses with that score
+const SEED_SCORES = { 0: 1, 12: 1, 14: 1, 17: 2, 20: 1, 21: 1, 23: 3, 25: 3, 26: 1, 27: 1, 29: 2, 30: 1, 31: 1, 32: 1, 33: 1, 34: 2, 36: 1, 37: 1, 38: 2, 39: 3, 40: 6, 41: 5, 42: 4, 43: 16, 44: 7, 45: 14, 46: 19, 47: 16, 48: 13, 49: 19, 50: 19, 51: 26, 52: 26, 53: 18, 54: 24, 55: 13, 56: 19, 57: 24, 58: 6, 59: 2, 60: 6, 61: 3, 62: 3, 63: 6, 64: 6, 66: 2, 69: 2, 70: 1, 71: 1, 73: 2, 74: 1, 84: 1 };
+
+function ordinal(n) {
+  const suffix = ["th", "st", "nd", "rd"], v = n % 100;
+  return n + (suffix[(v - 20) % 10] || suffix[v] || suffix[0]);
 }
 
 const $ = id => document.getElementById(id);
@@ -297,6 +317,8 @@ function render(r, animate) {
   $("bar").style.width = r.score + "%";
   if (animate) { stamp.classList.remove("slam"); void stamp.offsetWidth; stamp.classList.add("slam"); }
   $("remark").textContent = r.closer;
+  $("shamed-note").hidden = true;
+  showPercentile(r);
   $("exhibits").replaceChildren(...r.exhibits.map((e, i) => {
     const li = document.createElement("li");
     const sign = e.delta > 0 ? "+" : "";
@@ -312,22 +334,85 @@ function judge(animate = true) {
   $("toast").textContent = "";
   const r = rule(text);
   render(r, animate);
-  if (animate) bang(r.verdict);
-  showEnshrine();
+  if (animate) {
+    bang(r.verdict);
+    fileRuling(r, text.trim());
+  }
 }
 
-// Hall of Shame: a shared list everyone with the page can add to (needs the claude.ai viewer).
+// Hall of Shame: every ruling's score is kept (not the excuse itself), and anything worse than
+// 99% of the cases on record is filed automatically. Needs the claude.ai viewer for the shared data.
 const VERDICT_COLOR = Object.fromEntries(VERDICTS.map(([, v, c]) => [v, c]));
 let shameDb = null;
+let canWrite = null;            // true / false / null (unknown: try, and let a refused write decide)
 let shamed = new Set();
+let liveScores = new Map();     // case key -> score, from the shared "rulings" collection
+let markLiveReady;
+const liveReady = new Promise(res => { markLiveReady = res; });
 
-function showEnshrine() {
-  const btn = $("enshrine");
-  btn.hidden = !shameDb || !last;
-  if (!last) return;
-  const already = shamed.has(last.docket);
-  btn.disabled = already;
-  btn.textContent = already ? "Already in the Hall of Shame" : "Add to the Hall of Shame";
+// How many cases on record are at least as believable as this score (ties count against you).
+function terribleness(score, key) {
+  const live = new Map(liveScores);
+  live.set(key, score);
+  let atLeast = 0, total = 0;
+  for (const [s, n] of Object.entries(SEED_SCORES)) { total += n; if (Number(s) >= score) atLeast += n; }
+  for (const s of live.values()) { total++; if (s >= score) atLeast++; }
+  return { atLeast, total };
+}
+const isShameworthy = ({ atLeast, total }) => atLeast * 100 >= 99 * total;
+
+function showPercentile(r) {
+  const t = terribleness(r.score, r.key);
+  const pct = Math.min(99, Math.floor(t.atLeast * 100 / t.total));
+  const p = $("percentile");
+  p.innerHTML = `Terribleness: <b></b> · <span></span>`;
+  p.querySelector("b").textContent = `${ordinal(pct)} percentile`;
+  p.querySelector("span").textContent = `${t.total.toLocaleString("en-US")} cases on record`;
+}
+
+const SHAMED_TEXT = {
+  filed: "Worse than 99% of all cases. Filed in the Hall of Shame automatically.",
+  already: "Worse than 99% of all cases. It's already hanging in the Hall of Shame.",
+  readonly: "Worse than 99% of all cases, but you can only view this court, so it wasn't filed. Ask the owner for Contributor access.",
+  failed: "Worse than 99% of all cases, but the Hall of Shame wouldn't take it. Try the gavel again in a moment.",
+};
+
+function showShamed(r, state) {
+  if (last !== r) return;   // a newer ruling is on screen
+  const note = $("shamed-note");
+  note.textContent = SHAMED_TEXT[state];
+  note.hidden = false;
+}
+
+async function fileRuling(r, text) {
+  if (!shameDb) return;
+  await Promise.race([liveReady, new Promise(res => setTimeout(res, 3000))]);
+  if (last === r) showPercentile(r);
+  const worthy = isShameworthy(terribleness(r.score, r.key));
+  if (canWrite === false) { if (worthy) showShamed(r, shamed.has(r.key) ? "already" : "readonly"); return; }
+
+  try {
+    await shameDb.collection("rulings").doc(r.key).set({ score: r.score, at: Date.now() });
+  } catch (e) {
+    if (e?.code === "invalid_argument") canWrite = false;
+  }
+  if (!worthy) return;
+  if (shamed.has(r.key)) { showShamed(r, "already"); return; }
+  if (canWrite === false) { showShamed(r, "readonly"); return; }
+
+  try {
+    await shameDb.collection("shame").doc(r.key).set({
+      excuse: text.slice(0, 400),
+      score: r.score,
+      verdict: r.verdict,
+      docket: r.docket,
+      at: Date.now(),
+    });
+    showShamed(r, "filed");
+  } catch (e) {
+    if (e?.code === "invalid_argument") canWrite = false;
+    showShamed(r, canWrite === false ? "readonly" : "failed");
+  }
 }
 
 function renderShame(docs) {
@@ -344,41 +429,33 @@ function renderShame(docs) {
     li.querySelector(".meta span").textContent = e.docket;
     return li;
   }));
-  showEnshrine();
 }
-
-$("enshrine").onclick = async () => {
-  if (!shameDb || !last || shamed.has(last.docket)) return;
-  const btn = $("enshrine");
-  btn.disabled = true;
-  try {
-    await shameDb.collection("shame").doc(last.docket).set({
-      excuse: $("excuse").value.trim().slice(0, 400),
-      score: last.score,
-      verdict: last.verdict,
-      docket: last.docket,
-      at: Date.now(),
-    });
-    $("toast").textContent = "Filed. Your shame is now public record.";
-  } catch (e) {
-    btn.disabled = false;
-    $("toast").textContent = e?.code === "permission_denied"
-      ? "You can only view this court. Ask the owner for Contributor access to add excuses."
-      : "Couldn't file it. Try again in a moment.";
-  }
-};
 
 (async () => {
   shameDb = await window.claude?.use?.("db");
   if (!shameDb) {
+    markLiveReady();
     $("shame-note").textContent = "Open this page on claude.ai while signed in to see the shared Hall of Shame.";
     $("shame-empty").hidden = true;
     return;
   }
-  showEnshrine();
+  const user = await window.claude.use("user");
+  canWrite = user ? await user.can("data.write") : null;
   shameDb.collection("shame").orderBy("score", "asc").limit(10).onSnapshot(
     snap => renderShame(snap.docs),
     () => { $("shame-note").textContent = "The Hall of Shame is closed right now. Refresh to try again."; }
+  );
+  shameDb.collection("rulings").orderBy("at", "desc").limit(1000).onSnapshot(
+    snap => {
+      liveScores = new Map();
+      for (const d of snap.docs) {
+        const s = d.data()?.score;
+        if (Number.isInteger(s) && s >= 0 && s <= 100) liveScores.set(d.id, s);
+      }
+      markLiveReady();
+      if (last) showPercentile(last);
+    },
+    () => markLiveReady()
   );
 })();
 
