@@ -108,6 +108,11 @@
   .shame .meta { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-soft); }
   .shame .meta b { color: var(--c, var(--stamp-bad)); font-weight: 600; }
   .shame-empty { font: 700 19px var(--f-hand); color: var(--ink-soft); margin: 0; }
+  .copy-box {
+    width: 100%; box-sizing: border-box; resize: none;
+    font: 400 13px/1.5 var(--f-mono); color: var(--ink);
+    background: rgb(255 255 255 / .7); border: 1px solid var(--ink-soft); border-radius: 6px; padding: 8px 10px;
+  }
   .percentile { font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-soft); margin: 0; font-variant-numeric: tabular-nums; }
   .percentile b { color: var(--ink); font-weight: 600; }
   .shamed-note {
@@ -147,6 +152,7 @@
     <button class="ghost" id="sound" type="button" aria-pressed="true">Sound: on</button>
     <span class="toast" id="toast" aria-live="polite"></span>
   </div>
+  <textarea class="copy-box" id="copy-box" rows="4" readonly hidden aria-label="Verdict to copy"></textarea>
 
   <section class="ruling" aria-live="polite">
     <div class="ruling-top">
@@ -162,9 +168,9 @@
 
   <section class="shame" aria-live="polite">
     <h2>Hall of Shame</h2>
-    <p class="shame-note" id="shame-note">Excuses worse than 99% of the cases on record get filed here automatically. These are the 10 least believable.</p>
+    <p class="shame-note" id="shame-note">Any excuse at least as bad as 99% of the cases on record gets filed here automatically. These are the 10 least believable.</p>
     <ol id="shame-list"></ol>
-    <p class="shame-empty" id="shame-empty">Nobody has been shamed yet. Be the first.</p>
+    <p class="shame-empty" id="shame-empty" hidden>Nobody has been shamed yet. Be the first.</p>
   </section>
 
   <footer>The ruling is final. Same excuse, same verdict, so re-rolling won't save you.</footer>
@@ -332,37 +338,57 @@ function judge(animate = true) {
   const text = $("excuse").value;
   if (!text.trim()) { $("toast").textContent = "Write an excuse first. Silence is not a defense."; return; }
   $("toast").textContent = "";
+  $("copy-box").hidden = true;
   const r = rule(text);
+  r.text = text.trim();
   render(r, animate);
   if (animate) {
     bang(r.verdict);
-    fileRuling(r, text.trim());
+    fileRuling(r);
   }
 }
 
-// Hall of Shame: every ruling's score is kept (not the excuse itself), and anything worse than
-// 99% of the cases on record is filed automatically. Needs the claude.ai viewer for the shared data.
-const VERDICT_COLOR = Object.fromEntries(VERDICTS.map(([, v, c]) => [v, c]));
-let shameDb = null;
-let canWrite = null;            // true / false / null (unknown: try, and let a refused write decide)
-let shamed = new Set();
-let liveScores = new Map();     // case key -> score, from the shared "rulings" collection
-let markLiveReady;
+// Hall of Shame. Each ruling's score (never the excuse text) is kept in one of 1000 reusable "rulings"
+// slots, so the record stays a bounded sample of recent cases. An excuse at least as bad as 99% of the
+// other cases on record (the seed plus those slots) is filed in "shame" automatically.
+// The shared data needs the claude.ai viewer; elsewhere percentiles use the seed alone.
+const SLOTS = 1000;
+let shameDb;                 // undefined until claude.use("db") answers, then the namespace or null
+let canWrite = null;         // from user.can("data.write"): true / false / null (unknown: try, and let a refused write decide)
+let blocked = null;          // why filing stopped for this visit: "readonly", "gone" or "full"
+let slots = new Map();       // slot id -> { key, score }
+let liveScores = new Map();  // case key -> score
+let liveOk = false;          // a server-definitive rulings snapshot arrived and the listener is alive
+const filing = new Set();    // case keys with writes in flight
+let markDbReady, markLiveReady;
+const dbReady = new Promise(res => { markDbReady = res; });
 const liveReady = new Promise(res => { markLiveReady = res; });
+const wait = ms => new Promise(res => setTimeout(res, ms));
+const writesOff = () => canWrite === false || blocked === "readonly" || blocked === "gone";
 
-// How many cases on record are at least as believable as this score (ties count against you).
+function slotFor(key) {
+  return "slot-" + String(parseInt(key, 36) % SLOTS).padStart(3, "0");
+}
+
+function verdictFor(score) {
+  return VERDICTS.find(([min]) => score >= min);
+}
+
+// Compare with every other case on record: how many are at least as believable (ties count against you).
 function terribleness(score, key) {
-  const live = new Map(liveScores);
-  live.set(key, score);
   let atLeast = 0, total = 0;
   for (const [s, n] of Object.entries(SEED_SCORES)) { total += n; if (Number(s) >= score) atLeast += n; }
-  for (const s of live.values()) { total++; if (s >= score) atLeast++; }
+  for (const [k, s] of liveScores) {
+    if (k === key) continue;
+    total++;
+    if (s >= score) atLeast++;
+  }
   return { atLeast, total };
 }
 const isShameworthy = ({ atLeast, total }) => atLeast * 100 >= 99 * total;
 
 function showPercentile(r) {
-  const t = terribleness(r.score, r.key);
+  const t = r.final || terribleness(r.score, r.key);
   const pct = Math.min(99, Math.floor(t.atLeast * 100 / t.total));
   const p = $("percentile");
   p.innerHTML = `Terribleness: <b></b> · <span></span>`;
@@ -370,93 +396,162 @@ function showPercentile(r) {
   p.querySelector("span").textContent = `${t.total.toLocaleString("en-US")} cases on record`;
 }
 
+const WORST = "At least as bad as 99% of the cases on record.";
 const SHAMED_TEXT = {
-  filed: "Worse than 99% of all cases. Filed in the Hall of Shame automatically.",
-  already: "Worse than 99% of all cases. It's already hanging in the Hall of Shame.",
-  readonly: "Worse than 99% of all cases, but you can only view this court, so it wasn't filed. Ask the owner for Contributor access.",
-  failed: "Worse than 99% of all cases, but the Hall of Shame wouldn't take it. Try the gavel again in a moment.",
+  filed: `${WORST} Filed in the Hall of Shame automatically.`,
+  already: `${WORST} It's already hanging in the Hall of Shame.`,
+  readonly: `${WORST} You can only view this court, so it wasn't filed.`,
+  gone: `${WORST} Filing isn't available on this page right now, so it wasn't filed.`,
+  full: `${WORST} The court's records are full, so it wasn't filed. The page owner needs to clear out old entries.`,
+  failed: `${WORST} The Hall of Shame didn't respond, so it wasn't filed. Bang the gavel again to retry.`,
+  nodata: "The court records didn't load, so this case wasn't checked for the Hall of Shame.",
 };
 
+// Only touch the screen while this case is still the one shown (a repeat press of the same excuse counts).
+const onScreen = r => last && last.key === r.key;
+
 function showShamed(r, state) {
-  if (last !== r) return;   // a newer ruling is on screen
+  if (!onScreen(r)) return;
   const note = $("shamed-note");
   note.textContent = SHAMED_TEXT[state];
   note.hidden = false;
 }
 
-async function fileRuling(r, text) {
-  if (!shameDb) return;
-  await Promise.race([liveReady, new Promise(res => setTimeout(res, 3000))]);
-  if (last === r) showPercentile(r);
-  const worthy = isShameworthy(terribleness(r.score, r.key));
-  if (canWrite === false) { if (worthy) showShamed(r, shamed.has(r.key) ? "already" : "readonly"); return; }
-
-  try {
-    await shameDb.collection("rulings").doc(r.key).set({ score: r.score, at: Date.now() });
-  } catch (e) {
-    if (e?.code === "invalid_argument") canWrite = false;
+// What a rejected write means for the rest of the visit, per the db contract's error codes.
+function writeProblem(e) {
+  switch (e?.code) {
+    case "invalid_argument": case "transform_error": return "readonly";
+    case "quota_exceeded": return "full";
+    case "revoked": case "not_granted": case "capability_disabled": case "capability_removed": return "gone";
+    default: return "failed";
   }
-  if (!worthy) return;
-  if (shamed.has(r.key)) { showShamed(r, "already"); return; }
-  if (canWrite === false) { showShamed(r, "readonly"); return; }
+}
+
+// One write; "unavailable" gets a single retry after a short random delay.
+async function write(ref, data) {
+  try {
+    await ref.set(data);
+  } catch (e) {
+    if (e?.code !== "unavailable") throw e;
+    await wait(400 + Math.random() * 800);
+    await ref.set(data);
+  }
+}
+
+async function fileRuling(r) {
+  if (filing.has(r.key)) return;   // this case is already being filed
+  filing.add(r.key);
+  try { await fileCase(r); } finally { filing.delete(r.key); }
+}
+
+async function fileCase(r) {
+  await dbReady;
+  if (!shameDb) return;
+  await Promise.race([liveReady, wait(8000)]);
+  if (!liveOk) {
+    if (isShameworthy(terribleness(r.score, r.key))) showShamed(r, "nodata");
+    return;
+  }
+  r.final = terribleness(r.score, r.key);   // freeze the comparison this decision rests on
+  if (onScreen(r)) { last.final = r.final; showPercentile(last); }
+
+  await recordRuling(r);
+  if (!isShameworthy(r.final)) return;
+
+  const ref = shameDb.collection("shame").doc(r.key);
+  let exists = false;
+  try { exists = (await ref.get()).exists; } catch {}
+  if (exists) { showShamed(r, "already"); return; }
+  if (writesOff() || blocked === "full") { showShamed(r, blocked || "readonly"); return; }
 
   try {
-    await shameDb.collection("shame").doc(r.key).set({
-      excuse: text.slice(0, 400),
-      score: r.score,
-      verdict: r.verdict,
-      docket: r.docket,
-      at: Date.now(),
-    });
+    await write(ref, { excuse: r.text.slice(0, 400), score: r.score, verdict: r.verdict, docket: r.docket, at: Date.now() });
     showShamed(r, "filed");
   } catch (e) {
-    if (e?.code === "invalid_argument") canWrite = false;
-    showShamed(r, canWrite === false ? "readonly" : "failed");
+    const problem = writeProblem(e);
+    if (problem !== "failed") blocked = problem;
+    showShamed(r, problem);
+  }
+}
+
+async function recordRuling(r) {
+  if (writesOff()) return;
+  const id = slotFor(r.key), held = slots.get(id);
+  if (held && held.key === r.key && held.score === r.score) return;   // already on record
+  try {
+    await write(shameDb.collection("rulings").doc(id), { key: r.key, score: r.score, at: Date.now() });
+  } catch (e) {
+    const problem = writeProblem(e);
+    if (problem === "readonly" || problem === "gone") blocked = problem;
   }
 }
 
 function renderShame(docs) {
-  shamed = new Set(docs.map(d => d.id));
-  $("shame-empty").hidden = docs.length > 0;
-  $("shame-list").replaceChildren(...docs.map(d => {
-    const e = d.data();
+  const seen = new Set(), rows = [];
+  for (const d of docs) {
+    const e = d.data() || {};
+    if (typeof e.excuse !== "string" || !Number.isInteger(e.score) || e.score < 0 || e.score > 100) continue;
+    const k = caseKey(e.excuse);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    rows.push(e);
+  }
+  $("shame-empty").hidden = rows.length > 0;
+  $("shame-list").replaceChildren(...rows.map(e => {
+    const [, verdict, color] = verdictFor(e.score);
     const li = document.createElement("li");
     li.innerHTML = `<span class="rank"></span><div><div class="quote"></div><div class="meta"><b></b> · <span></span></div></div>`;
-    li.querySelector(".quote").textContent = `“${e.excuse}”`;
-    const verdict = li.querySelector(".meta b");
-    verdict.textContent = `${e.verdict} ${e.score}/100`;
-    li.querySelector(".meta").style.setProperty("--c", VERDICT_COLOR[e.verdict] || "var(--stamp-bad)");
-    li.querySelector(".meta span").textContent = e.docket;
+    li.querySelector(".quote").textContent = `“${e.excuse.slice(0, 400)}”`;
+    li.querySelector(".meta b").textContent = `${verdict} ${e.score}/100`;
+    li.querySelector(".meta").style.setProperty("--c", color);
+    li.querySelector(".meta span").textContent = typeof e.docket === "string" ? e.docket.slice(0, 20) : "";
     return li;
   }));
 }
 
+// Subscribe once. A listener that dies with "unavailable" gets one fresh subscription, per the db contract.
+function watch(query, next, dead, retried = false) {
+  query.onSnapshot(next, e => {
+    if (e?.code === "unavailable" && !retried) setTimeout(() => watch(query, next, dead, true), 1500 + Math.random() * 1500);
+    else dead(e);
+  });
+}
+
 (async () => {
-  shameDb = await window.claude?.use?.("db");
+  try { shameDb = (await window.claude?.use?.("db")) ?? null; } catch { shameDb = null; }
+  markDbReady();
   if (!shameDb) {
     markLiveReady();
     $("shame-note").textContent = "Open this page on claude.ai while signed in to see the shared Hall of Shame.";
-    $("shame-empty").hidden = true;
     return;
   }
-  const user = await window.claude.use("user");
-  canWrite = user ? await user.can("data.write") : null;
-  shameDb.collection("shame").orderBy("score", "asc").limit(10).onSnapshot(
+  watch(
+    shameDb.collection("shame").orderBy("score", "asc").limit(10),
     snap => renderShame(snap.docs),
-    () => { $("shame-note").textContent = "The Hall of Shame is closed right now. Refresh to try again."; }
+    () => {
+      $("shame-note").textContent = "The Hall of Shame is closed right now. Refresh to try again.";
+      $("shame-empty").hidden = true;
+    }
   );
-  shameDb.collection("rulings").orderBy("at", "desc").limit(1000).onSnapshot(
+  watch(
+    shameDb.collection("rulings").limit(SLOTS),
     snap => {
+      slots = new Map();
       liveScores = new Map();
       for (const d of snap.docs) {
-        const s = d.data()?.score;
-        if (Number.isInteger(s) && s >= 0 && s <= 100) liveScores.set(d.id, s);
+        const v = d.data();
+        if (typeof v?.key !== "string" || !Number.isInteger(v.score) || v.score < 0 || v.score > 100) continue;
+        slots.set(d.id, { key: v.key, score: v.score });
+        liveScores.set(v.key, v.score);
       }
-      markLiveReady();
+      if (!snap.metadata?.fromCache) { liveOk = true; markLiveReady(); }
       if (last) showPercentile(last);
     },
-    () => markLiveReady()
+    () => { liveOk = false; markLiveReady(); }
   );
+  const user = await window.claude.use("user");
+  const can = user ? await user.can("data.write") : null;
+  if (canWrite !== false) canWrite = can;
 })();
 
 $("samples").replaceChildren(...SAMPLES.map(s => {
@@ -477,11 +572,19 @@ $("excuse").addEventListener("keydown", e => { if (e.key === "Enter" && (e.metaK
 
 $("copy").onclick = () => {
   if (!last) return;
-  const text = `Excuse Court ${last.docket}\n"${$("excuse").value.trim()}"\nVerdict: ${last.verdict} (${last.score}/100)\n${last.closer}`;
-  const done = () => { $("toast").textContent = "Copied. Go embarrass yourself."; };
+  const text = `Excuse Court ${last.docket}\n"${last.text}"\nVerdict: ${last.verdict} (${last.score}/100)\n${last.closer}`;
+  const done = () => { $("copy-box").hidden = true; $("toast").textContent = "Copied. Go embarrass yourself."; };
+  const fallback = () => {
+    const box = $("copy-box");
+    box.value = text;
+    box.hidden = false;
+    box.focus();
+    box.select();
+    $("toast").textContent = "Couldn't copy automatically. The verdict is selected below, so copy it from there.";
+  };
   try {
-    navigator.clipboard.writeText(text).then(done, () => { $("excuse").select(); $("toast").textContent = "Couldn't copy. Select the text and copy it yourself."; });
-  } catch { $("toast").textContent = "Couldn't copy. Select the text and copy it yourself."; }
+    navigator.clipboard.writeText(text).then(done, fallback);
+  } catch { fallback(); }
 };
 
 // Open with a case already on the record.
