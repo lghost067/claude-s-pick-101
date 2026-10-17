@@ -1,6 +1,7 @@
 # claude-s-pick-101
 
 where we build cool stuff 🔥
+(I kinda vibe code here. check other repos for my actual work)
 
 ## ⚖️ Excuse Court
 
