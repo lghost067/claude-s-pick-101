@@ -96,6 +96,27 @@
   .toast { font-size: 12px; color: var(--stamp-good); }
   footer { font-size: 11px; color: var(--ink-soft); }
 
+  .shame { display: flex; flex-direction: column; gap: 12px; border-top: 2px solid var(--ink); padding-top: 18px; }
+  .shame h2 { font: 400 22px/1.1 var(--f-display); margin: 0; color: var(--stamp-bad); }
+  .shame-note { font-size: 12px; color: var(--ink-soft); margin: 0; }
+  .shame ol { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 10px; counter-reset: rank; }
+  .shame li { display: grid; grid-template-columns: 44px 1fr; gap: 10px; align-items: start; counter-increment: rank; }
+  .shame li > * { min-width: 0; }
+  .shame .rank { font: 400 20px/1 var(--f-display); font-variant-numeric: tabular-nums; color: var(--ink-soft); padding-top: 4px; }
+  .shame .rank::before { content: "#" counter(rank); }
+  .shame .quote { font: 700 19px/1.35 var(--f-hand); overflow-wrap: anywhere; }
+  .shame .meta { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-soft); }
+  .shame .meta b { color: var(--c, var(--stamp-bad)); font-weight: 600; }
+  .shame-empty { font: 700 19px var(--f-hand); color: var(--ink-soft); margin: 0; }
+  button.enshrine {
+    align-self: flex-start;
+    font: 400 13px var(--f-display); letter-spacing: .03em;
+    background: transparent; color: var(--stamp-bad); border: 2px solid var(--stamp-bad); border-radius: 6px;
+    padding: 10px 14px; cursor: pointer;
+  }
+  button.enshrine:hover { background: var(--stamp-bad); color: var(--pad); }
+  button.enshrine:disabled { opacity: .45; cursor: default; background: transparent; color: var(--stamp-bad); }
+
   @media (max-width: 480px) {
     .sheet { padding-left: 52px; padding-right: 14px; background:
       linear-gradient(to right, transparent 38px, var(--margin) 38px, var(--margin) 40px, transparent 40px),
@@ -137,6 +158,14 @@
     <div class="meter"><i id="bar"></i></div>
     <p class="remark" id="remark"></p>
     <ul class="exhibits" id="exhibits"></ul>
+    <button class="enshrine" id="enshrine" type="button" hidden>Add to the Hall of Shame</button>
+  </section>
+
+  <section class="shame" aria-live="polite">
+    <h2>Hall of Shame</h2>
+    <p class="shame-note" id="shame-note">The 10 least believable excuses ever filed in this court.</p>
+    <ol id="shame-list"></ol>
+    <p class="shame-empty" id="shame-empty">Nobody has been shamed yet. Be the first.</p>
   </section>
 
   <footer>The ruling is final. Same excuse, same verdict, so re-rolling won't save you.</footer>
@@ -284,7 +313,74 @@ function judge(animate = true) {
   const r = rule(text);
   render(r, animate);
   if (animate) bang(r.verdict);
+  showEnshrine();
 }
+
+// Hall of Shame: a shared list everyone with the page can add to (needs the claude.ai viewer).
+const VERDICT_COLOR = Object.fromEntries(VERDICTS.map(([, v, c]) => [v, c]));
+let shameDb = null;
+let shamed = new Set();
+
+function showEnshrine() {
+  const btn = $("enshrine");
+  btn.hidden = !shameDb || !last;
+  if (!last) return;
+  const already = shamed.has(last.docket);
+  btn.disabled = already;
+  btn.textContent = already ? "Already in the Hall of Shame" : "Add to the Hall of Shame";
+}
+
+function renderShame(docs) {
+  shamed = new Set(docs.map(d => d.id));
+  $("shame-empty").hidden = docs.length > 0;
+  $("shame-list").replaceChildren(...docs.map(d => {
+    const e = d.data();
+    const li = document.createElement("li");
+    li.innerHTML = `<span class="rank"></span><div><div class="quote"></div><div class="meta"><b></b> · <span></span></div></div>`;
+    li.querySelector(".quote").textContent = `“${e.excuse}”`;
+    const verdict = li.querySelector(".meta b");
+    verdict.textContent = `${e.verdict} ${e.score}/100`;
+    li.querySelector(".meta").style.setProperty("--c", VERDICT_COLOR[e.verdict] || "var(--stamp-bad)");
+    li.querySelector(".meta span").textContent = e.docket;
+    return li;
+  }));
+  showEnshrine();
+}
+
+$("enshrine").onclick = async () => {
+  if (!shameDb || !last || shamed.has(last.docket)) return;
+  const btn = $("enshrine");
+  btn.disabled = true;
+  try {
+    await shameDb.collection("shame").doc(last.docket).set({
+      excuse: $("excuse").value.trim().slice(0, 400),
+      score: last.score,
+      verdict: last.verdict,
+      docket: last.docket,
+      at: Date.now(),
+    });
+    $("toast").textContent = "Filed. Your shame is now public record.";
+  } catch (e) {
+    btn.disabled = false;
+    $("toast").textContent = e?.code === "permission_denied"
+      ? "You can only view this court. Ask the owner for Contributor access to add excuses."
+      : "Couldn't file it. Try again in a moment.";
+  }
+};
+
+(async () => {
+  shameDb = await window.claude?.use?.("db");
+  if (!shameDb) {
+    $("shame-note").textContent = "Open this page on claude.ai while signed in to see the shared Hall of Shame.";
+    $("shame-empty").hidden = true;
+    return;
+  }
+  showEnshrine();
+  shameDb.collection("shame").orderBy("score", "asc").limit(10).onSnapshot(
+    snap => renderShame(snap.docs),
+    () => { $("shame-note").textContent = "The Hall of Shame is closed right now. Refresh to try again."; }
+  );
+})();
 
 $("samples").replaceChildren(...SAMPLES.map(s => {
   const b = document.createElement("button");
