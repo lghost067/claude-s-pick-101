@@ -7,7 +7,7 @@ where we build cool stuff 🔥
 
 Type your excuse for being late. A very judgmental judge rates how believable it is, stamps a verdict, and bangs the gavel. The worse the excuse, the more it bangs.
 
-**▶️ Play it: https://kyamavictor854-del.github.io/claude-s-pick-101/**
+**▶️ Play it: https://lghost067.github.io/claude-s-pick-101/**
 
 ### What it does
 
